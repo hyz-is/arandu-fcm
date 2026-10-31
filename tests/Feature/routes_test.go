@@ -16,7 +16,7 @@ import (
 	"github.com/arandu-io/hesape/database/migrations"
 	hhttp "github.com/arandu-io/hesape/http"
 
-	skeleton "github.com/arandu-io/package-skeleton"
+	fcm "github.com/hyz-is/arandu-fcm"
 )
 
 // These tests drive the module the way an application does: build it, register
@@ -49,7 +49,7 @@ type mounted struct {
 }
 
 // mount builds the module and returns a router with its routes registered.
-func mount(t *testing.T, cfg skeleton.Config) mounted {
+func mount(t *testing.T, cfg fcm.Config) mounted {
 	t.Helper()
 
 	sessions := security.NewSessionStore([]byte(appKey), time.Hour, false, security.NewMemoryBackend())
@@ -63,7 +63,7 @@ func mount(t *testing.T, cfg skeleton.Config) mounted {
 	})
 	flash := security.NewFlash([]byte(appKey), false)
 
-	module, err := skeleton.New(cfg, data.Wrap(nil, data.DialectSQLite), sessions)
+	module, err := fcm.New(cfg, data.Wrap(nil, data.DialectSQLite), sessions)
 	if err != nil {
 		t.Fatalf("building the module: %v", err)
 	}
@@ -131,15 +131,15 @@ var everyRoute = []struct {
 	target string
 	body   string
 }{
-	{http.MethodGet, skeleton.DefaultPrefix, ""},
-	{http.MethodGet, skeleton.DefaultPrefix + "/record-1", ""},
-	{http.MethodPost, skeleton.DefaultPrefix, "name=one"},
+	{http.MethodGet, fcm.DefaultPrefix, ""},
+	{http.MethodGet, fcm.DefaultPrefix + "/record-1", ""},
+	{http.MethodPost, fcm.DefaultPrefix, "name=one"},
 }
 
 func TestAVisitorWithNoSessionIsSentToSignIn(t *testing.T) {
 	t.Parallel()
 
-	m := mount(t, skeleton.Config{})
+	m := mount(t, fcm.Config{})
 
 	// RequireAuth answers before the handler runs, so a visitor with no
 	// session reaches neither the policy nor the database: the answer is the
@@ -157,7 +157,7 @@ func TestAVisitorWithNoSessionIsSentToSignIn(t *testing.T) {
 func TestASignedInSubjectReachesThePolicyAndIsRefused(t *testing.T) {
 	t.Parallel()
 
-	m := mount(t, skeleton.Config{})
+	m := mount(t, fcm.Config{})
 	cookies := m.signIn(t, administrator())
 
 	// The guard admits the session and puts its subject on the request; the
@@ -176,14 +176,14 @@ func TestASignedInSubjectReachesThePolicyAndIsRefused(t *testing.T) {
 func TestARejectedInputGoesBackBeforeTheDatabase(t *testing.T) {
 	t.Parallel()
 
-	m := mount(t, skeleton.Config{})
+	m := mount(t, fcm.Config{})
 	cookies := m.signIn(t, administrator())
 
 	// The input is validated before anything is authorized, so this refusal
 	// comes from the request and not from the policy. The router answers it the
 	// way it answers every rejected form: back where it came from, with the
 	// messages in the flash -- and it still never reaches a statement.
-	rec := m.answer(t, http.MethodPost, skeleton.DefaultPrefix, "name=", cookies...)
+	rec := m.answer(t, http.MethodPost, fcm.DefaultPrefix, "name=", cookies...)
 	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/" {
 		t.Fatalf("an empty name answered %d to %q, want %d back to /", rec.Code, rec.Header().Get("Location"), http.StatusSeeOther)
 	}
@@ -209,7 +209,7 @@ func TestTheRouterAnswersAMissingRecordWith404(t *testing.T) {
 
 	router := fhttp.NewRouter()
 	router.Action(http.MethodGet, "/missing", func(*fhttp.Context) error {
-		return skeleton.ErrNotFound
+		return fcm.ErrNotFound
 	})
 	m := mounted{router: router}
 
@@ -221,11 +221,11 @@ func TestTheRouterAnswersAMissingRecordWith404(t *testing.T) {
 func TestTheModuleRegistersItsRoutesUnderItsPrefix(t *testing.T) {
 	t.Parallel()
 
-	m := mount(t, skeleton.Config{Prefix: "/widgets"})
+	m := mount(t, fcm.Config{Prefix: "/widgets"})
 
 	got := make([]string, 0, 3)
 	for _, route := range m.router.Routes() {
-		if route.Module != "skeleton" {
+		if route.Module != "fcm" {
 			t.Errorf("the route %s %s is not tagged with the module name: %q", route.Method, route.Pattern, route.Module)
 		}
 		got = append(got, route.Method+" "+route.Pattern)
@@ -255,7 +255,7 @@ func TestTheModuleRegistersItsRoutesUnderItsPrefix(t *testing.T) {
 func TestNoRouteLandsInTheFrameworkNamespace(t *testing.T) {
 	t.Parallel()
 
-	for _, cfg := range []skeleton.Config{
+	for _, cfg := range []fcm.Config{
 		{},
 		{Prefix: "/widgets"},
 	} {
@@ -280,18 +280,18 @@ func TestNewRefusesAWiringThatCannotWork(t *testing.T) {
 
 	sessions := security.NewSessionStore([]byte(appKey), time.Hour, false, security.NewMemoryBackend())
 	handle := data.Wrap(nil, data.DialectSQLite)
-	valid := skeleton.Config{}
+	valid := fcm.Config{}
 
-	if _, err := skeleton.New(skeleton.Config{PageSize: -1}, handle, sessions); err == nil {
+	if _, err := fcm.New(fcm.Config{PageSize: -1}, handle, sessions); err == nil {
 		t.Error("a configuration with a negative page size was accepted")
 	}
-	if _, err := skeleton.New(valid, nil, sessions); err == nil {
+	if _, err := fcm.New(valid, nil, sessions); err == nil {
 		t.Error("a nil database handle was accepted")
 	}
-	if _, err := skeleton.New(valid, handle, nil); err == nil {
+	if _, err := fcm.New(valid, handle, nil); err == nil {
 		t.Error("a nil session store was accepted")
 	}
-	if _, err := skeleton.New(valid, handle, sessions); err != nil {
+	if _, err := fcm.New(valid, handle, sessions); err != nil {
 		t.Fatalf("a valid wiring was refused: %v", err)
 	}
 }
@@ -303,7 +303,7 @@ func TestNewRefusesARoutePrefixThatCannotBeRegistered(t *testing.T) {
 	handle := data.Wrap(nil, data.DialectSQLite)
 
 	for _, prefix := range []string{"/widgets{", "/widgets/{id}"} {
-		if _, err := skeleton.New(skeleton.Config{Prefix: prefix}, handle, sessions); err == nil {
+		if _, err := fcm.New(fcm.Config{Prefix: prefix}, handle, sessions); err == nil {
 			t.Errorf("New accepted route prefix %q, which would panic during route registration", prefix)
 		}
 	}
@@ -313,7 +313,7 @@ func TestTheModuleDeclaresItsSchema(t *testing.T) {
 	t.Parallel()
 
 	sessions := security.NewSessionStore([]byte(appKey), time.Hour, false, security.NewMemoryBackend())
-	module, err := skeleton.New(skeleton.Config{}, data.Wrap(nil, data.DialectSQLite), sessions)
+	module, err := fcm.New(fcm.Config{}, data.Wrap(nil, data.DialectSQLite), sessions)
 	if err != nil {
 		t.Fatalf("building the module: %v", err)
 	}
