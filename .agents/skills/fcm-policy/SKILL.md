@@ -13,13 +13,17 @@ this package unsafe while looking like working code.
 
 ## How a request actually gets through
 
-Four things happen, in this order, and each one is a different file.
+Four things happen, in this order, and each one is a different file. (The work
+done for a notification or the scheduled clean has no person behind it: it
+checks the Grant it was handed -- `g.Check(notifications.ActionSend)` or
+`g.Check(DeviceClean)` -- before its first query, and the audit holds that
+order the same way.)
 
 1. `service.go` validates the input. A rejected input never reaches a policy.
 2. `service.go` calls `security.Authorize(ctx, s.policy, actor, ACTION, record)`.
 3. `policy.go` `Can` returns nil, or the reason it will not.
 4. Only then does a `security.Grant` exist, and `service.go` reaches
-   `Fcms(s.db)` and a Model terminal with it.
+   `Devices(s.db)` and a Model terminal with it.
 
 The Grant is the mechanism, and it is worth knowing exactly how much it
 guarantees. `Authorize` is the only function in the framework that returns a
@@ -34,7 +38,7 @@ here reports it either. Do not reach for it in this package.
 
 The Model requires a Grant and applies its tenant, but it does not decide which
 Policy action that Grant represents. `security.Authorize` before the first
-`Fcms(s.db)` call is therefore mandatory even though the terminal itself
+`Devices(s.db)` call is therefore mandatory even though the terminal itself
 also takes `g`.
 
 ## The procedure
@@ -45,11 +49,22 @@ also takes `g`.
 
 ```go
 	// arandu:begin custom
-	if a == FcmView && (s.ID == record.ID || s.HasRole("admin")) {
-		return nil
-	}
+	case DeviceUnregister, DeviceList:
+		if s.Can(DeviceManage) {
+			return nil
+		}
+		if s.Can(a) && record.UserID == s.ID {
+			return nil
+		}
 	// arandu:end custom
 ```
+
+An action opens for a subject that carries it (`s.Can`, filled by
+arandu-permission from `Actions()`), and a person's own phone is theirs alone:
+the rule that compares `record.UserID` with `s.ID` is why the service probes
+with `Device{UserID: actor.ID}` -- the empty candidate would belong to nobody.
+`DeviceClean` has no rule on purpose: the scheduled clean issues its own Grant
+and no subject holds it.
 
 Nothing regenerates this file in this repository, so here the markers cost
 nothing and buy one thing: the same policy regenerated inside an application
@@ -68,28 +83,28 @@ subject that arrives with an empty `ID` and is still authorized at all. The zero
 `Subject` — an empty `ID` with no guest marker — is refused by `Authorize`
 before `Can` is consulted, because it is almost always a session that failed to
 load, and a policy asked about nobody answers about nobody.
-`TestAuthorizeRefusesASubjectThatIsNobody` at `tests/Unit/policy_test.go:94`
-holds that apart from the guest case, and `TestThePolicyDeniesAGuest:82` proves
-a guest is refused until somebody writes a rule for one.
+`TestAuthorizeRefusesASubjectThatIsNobody` in `tests/Unit/policy_test.go`
+holds that apart from the guest case, and `TestThePolicyDeniesAGuest` proves a
+guest is refused until somebody writes a rule for one.
 
 **3. Leave the tenant check above the block alone.**
 
 ```go
 	if record.ID != "" && record.TenantID != s.Tenant {
-		return fmt.Errorf("fcm belongs to another tenant")
+		return fmt.Errorf("device belongs to another tenant")
 	}
 ```
 
 It runs before every rule, and it is the one refusal that has to survive
 somebody opening the actions below it: a rule allowing an owner to read their
 own record allows it across customers as soon as two customers have a record
-with the same identifier. `TestThePolicyDeniesARecordOfAnotherTenant:65` asserts
+with the same identifier. `TestThePolicyDeniesADeviceOfAnotherTenant` asserts
 the message contains `another tenant`, so the sentence is part of the contract.
 The empty `ID` is exempt because it is the candidate that has not been stored
 yet, and it belongs to nobody until it is written with the tenant off the Grant.
 
-**4. Add the action to the test list if you added an action.** `everyAction` at
-`tests/Unit/policy_test.go:34` is the whole set the default-deny tests walk. A
+**4. Add the action to the test list if you added an action.** `everyAction` in
+`tests/Unit/policy_test.go` is the whole set the default-deny tests walk. A
 list holding four of five passes while the fifth is open, which is the only
 state in which any of this matters.
 
@@ -108,20 +123,20 @@ allowed, which is still refused — rather than removing the action from
 
 ## Adding a Model-backed service method
 
-`FcmService` owns `db *data.DB`. Validate first, build the value the Policy
-must see, call `security.Authorize`, and only then call `Fcms(s.db)`.
-`TestEveryServiceMethodAuthorizesBeforeTheModel` reads every exported Service
-method and refuses the opposite order; the runtime twin uses a nil database so
+`DeviceService` owns `db *data.DB`. Validate first, build the value the Policy
+must see, call `security.Authorize`, and only then call `Devices(s.db)`.
+`TestEveryFunctionAuthorizesBeforeTheModel` reads every function that reaches the
+Model and refuses the opposite order; the runtime twin uses a nil database so
 even constructing the query early fails.
 
-Create builds the row with `Fcms(s.db).New()`, keeps its pointer, fills it
+`Register` builds the row with `Devices(s.db).New()`, keeps its pointer, fills it
 field by field, writes `TenantID` from `data.Tenant(g)`, and calls
-`Save(ctx, g)`. Find and Get return pointers too. A copy of a row keeps the model
+`Save(ctx, g)`. Terminals return pointers too. A copy of a row keeps the model
 of the original, and the model refuses to write through it with
 `model.ErrUnwired`; assigning a whole struct over a row from `New()` does the
 same to the row.
 
-Every query starts at `Fcms(s.db)`. The constructor returns one mutable
+Every query starts at `Devices(s.db)`. The constructor returns one mutable
 query, so a second chain begun from a value held in a variable carries the
 clauses of the first.
 
@@ -147,13 +162,13 @@ There is no listing that skips the policy, and no read model, projection,
 report or export that does. A read path with no check is a leak between
 customers with a technical name.
 
-`Find` in `service.go` calls `Authorize` twice, and the second call is the one
-people delete:
+`UnregisterID` in `service.go` calls `Authorize` twice, and the second call is
+the one people delete:
 
 ```go
-	g, err := security.Authorize(ctx, s.policy, actor, FcmView, Fcm{})
-	record, err := Fcms(s.db).WhereKey(id).First(ctx, g)
-	_, err = security.Authorize(ctx, s.policy, actor, FcmView, *record)
+	g, err := security.Authorize(ctx, s.policy, actor, DeviceUnregister, Device{UserID: actor.ID})
+	record, err := Devices(s.db).WhereKey(id).First(ctx, g)
+	_, err = security.Authorize(ctx, s.policy, actor, DeviceUnregister, *record)
 ```
 
 The first call sees an empty value, so every rule about the record itself —
@@ -163,12 +178,13 @@ consulted about the thing it protects. The read is already scoped by
 `data.Tenant(g)`, so the second call is not what keeps customers apart; it is
 what keeps the policy honest.
 
-`List` authorizes once, on the empty candidate, and does not authorize per row.
+`ListForUser` authorizes once, on a candidate that names the user whose phones
+are read, and does not authorize per row.
 A policy call per record would be one call per row of a page and would still not
 narrow the query — a listing that has to read a customer's rows in order to
 decide it may not read them has already read them. **A rule that hides
 individual records from a listing belongs in the query, as a predicate**,
-beside the tenant filter — a scope on `*FcmQuery` when more than one use
+beside the tenant filter — a scope on `*DeviceQuery` when more than one use
 case needs it. The action decides whether the listing runs at all.
 
 ## Three shapes that look like authorization and are not

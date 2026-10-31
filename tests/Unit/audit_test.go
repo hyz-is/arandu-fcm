@@ -139,49 +139,112 @@ func firstCallTo(body *ast.BlockStmt, name string) token.Pos {
 	return found
 }
 
-// TestEveryServiceMethodAuthorizesBeforeTheModel holds the mandatory path on
-// every exported use case rather than on the three that exist today.
+// downstream are the unexported methods of DeviceService that reach the Model
+// with a Grant their caller already obtained. Each is reached only from a
+// function that authorized first, which the audit below checks at every call
+// site instead of trusting the list.
+var downstream = map[string]bool{"register": true, "makeRoom": true, "holds": true, "removeRecord": true}
+
+// authorizes is where a body first asks for a decision: security.Authorize for
+// a person, or Grant.Check for the work done under the Grant a notification or
+// the scheduler issued.
+func authorizes(body *ast.BlockStmt) token.Pos {
+	first := firstCallTo(body, "Authorize")
+	if check := firstCallTo(body, "Check"); check != token.NoPos && (first == token.NoPos || check < first) {
+		first = check
+	}
+	return first
+}
+
+// TestEveryFunctionAuthorizesBeforeTheModel holds the mandatory path on every
+// function that reaches the Model, not on the four use cases that exist today.
 //
 // A nil-database denial test proves the closed path. This syntax audit is its
-// twin for an allowed path: Model construction is visible in the method body,
-// and moving it above Authorize fails even when no terminal is executed.
-func TestEveryServiceMethodAuthorizesBeforeTheModel(t *testing.T) {
+// twin for an allowed path: Model construction is visible in the function body,
+// and moving it above the decision fails even when no terminal is executed.
+//
+//   - Every exported DeviceService method calls Authorize before it reaches the
+//     generated query.
+//   - Every other function that reaches it calls Authorize or Grant.Check
+//     first, unless it is one of the downstream helpers, which are then held at
+//     their call sites.
+//   - Nothing outside DeviceService reaches the Model at all.
+func TestEveryFunctionAuthorizesBeforeTheModel(t *testing.T) {
 	t.Parallel()
 
-	audited := 0
+	exported := 0
 	for _, source := range auditedFiles(t) {
 		for _, declaration := range source.file.Decls {
 			function, ok := declaration.(*ast.FuncDecl)
-			if !ok || function.Body == nil || receiverType(function) != "FcmService" ||
-				!function.Name.IsExported() {
+			if !ok || function.Body == nil {
 				continue
 			}
-			audited++
-
-			decided := firstCallTo(function.Body, "Authorize")
+			owner, name := receiverType(function), function.Name.Name
 			reach := firstModelReach(function.Body)
-			if decided == token.NoPos {
-				t.Errorf("%s: %s never calls security.Authorize, so no Policy decided whether the Model may run",
-					source.path, function.Name.Name)
+
+			if owner != "DeviceService" {
+				if reach != token.NoPos && !strings.HasSuffix(source.path, "Query.go") {
+					t.Errorf("%s: %s reaches the Model, which only DeviceService may", source.path, name)
+				}
+				continue
 			}
-			if reach == token.NoPos {
-				t.Errorf("%s: %s never reaches the generated query, so this audit found no data boundary to order",
-					source.path, function.Name.Name)
-			}
-			if decided != token.NoPos && reach != token.NoPos && decided > reach {
-				t.Errorf("%s: %s reaches the Model before security.Authorize",
-					source.path, function.Name.Name)
+			decided := authorizes(function.Body)
+			switch {
+			case function.Name.IsExported():
+				exported++
+				if first := firstCallTo(function.Body, "Authorize"); first == token.NoPos {
+					t.Errorf("%s: %s never calls security.Authorize, so no Policy decided whether the Model may run", source.path, name)
+				}
+				if reach == token.NoPos {
+					t.Errorf("%s: %s never reaches the generated query, so this audit found no data boundary to order", source.path, name)
+				}
+				if decided != token.NoPos && reach != token.NoPos && decided > reach {
+					t.Errorf("%s: %s reaches the Model before it is authorized", source.path, name)
+				}
+			case downstream[name]:
+				// Held at the call sites below.
+			case reach != token.NoPos:
+				if decided == token.NoPos || decided > reach {
+					t.Errorf("%s: %s reaches the Model before it asks for a decision", source.path, name)
+				}
 			}
 		}
 	}
-	if audited == 0 {
-		t.Fatal("no exported FcmService method was found, so this test proved nothing")
+	if exported == 0 {
+		t.Fatal("no exported DeviceService method was found, so this test proved nothing")
+	}
+
+	// A downstream helper is called only after a decision.
+	calls := 0
+	for _, source := range auditedFiles(t) {
+		for _, declaration := range source.file.Decls {
+			function, ok := declaration.(*ast.FuncDecl)
+			if !ok || function.Body == nil || downstream[function.Name.Name] && receiverType(function) == "DeviceService" {
+				continue
+			}
+			decided := authorizes(function.Body)
+			ast.Inspect(function.Body, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok || !downstream[calledName(call)] {
+					return true
+				}
+				calls++
+				if decided == token.NoPos || decided > call.Pos() {
+					t.Errorf("%s: %s calls %s before a decision was made", source.path, function.Name.Name, calledName(call))
+				}
+				return true
+			})
+		}
+	}
+	if calls == 0 {
+		t.Fatal("no downstream helper is called, so the list above proves nothing")
 	}
 }
 
-// firstModelReach is where a Service first constructs the generated query or
-// calls a promoted write terminal. Fcms itself counts: moving only its
-// construction before Authorize is the mutation this audit exists to reject.
+// firstModelReach is where a body first constructs the generated query, calls a
+// downstream helper that does, or calls a promoted write terminal. Devices
+// itself counts: moving only its construction before the decision is the
+// mutation this audit exists to reject.
 func firstModelReach(body *ast.BlockStmt) token.Pos {
 	terminals := map[string]bool{
 		"Save": true, "Delete": true, "Restore": true, "Touch": true,
@@ -193,7 +256,7 @@ func firstModelReach(body *ast.BlockStmt) token.Pos {
 			return true
 		}
 		name := calledName(call)
-		if name != "Fcms" && !terminals[name] {
+		if name != "Devices" && !terminals[name] && !downstream[name] {
 			return true
 		}
 		if found == token.NoPos || call.Pos() < found {
@@ -258,7 +321,7 @@ func TestTheServiceWritesTenantOnlyFromTheGrant(t *testing.T) {
 	for _, source := range auditedFiles(t) {
 		for _, declaration := range source.file.Decls {
 			function, ok := declaration.(*ast.FuncDecl)
-			if !ok || function.Body == nil || receiverType(function) != "FcmService" {
+			if !ok || function.Body == nil || receiverType(function) != "DeviceService" {
 				continue
 			}
 			ast.Inspect(function.Body, func(node ast.Node) bool {

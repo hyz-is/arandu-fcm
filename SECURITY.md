@@ -36,7 +36,13 @@ particular:
 - a query whose tenant scope is disabled, or a tenant taken from anywhere but
   `data.Tenant(g)`;
 - a `Grant` that can be produced without a policy returning nil;
-- a field reaching a response that `Resource` does not list.
+- a field reaching a response that `DeviceResource` does not list;
+- a registration token, a service account key, an access token or the
+  application key reaching a log line, an error, a `String()` or a JSON
+  encoding, or a token stored unsealed;
+- a path by which one tenant's pushes reach another tenant's phone, or one
+  user's phones are read or removed by another user without `DeviceManage`;
+- a delivery that repeats without the queue's tries bounding it.
 
 ## What is not
 

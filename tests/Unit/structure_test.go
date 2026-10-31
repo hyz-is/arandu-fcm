@@ -112,27 +112,26 @@ func TestThePackageUsesTheGeneratedConcreteModel(t *testing.T) {
 	wants := map[string][]string{
 		"model.go": {
 			`"github.com/arandu-io/hesape/database/model"`,
-			"type Fcm struct {\n\tmodel.Model\n",
-			"var fcmTable = model.NewTable(model.TableSpec{",
+			"type Device struct {\n\tmodel.Model\n",
+			"var deviceTable = model.NewTable(model.TableSpec{",
 			"ManualKey: true,",
 			"// arandu:begin custom\n",
 			"// arandu:end custom\n",
 		},
-		"FcmQuery.go": {
+		"DeviceQuery.go": {
 			generatedHeading,
-			"func Fcms(db model.DB) *FcmQuery",
-			"type FcmCollection []*Fcm",
+			"func Devices(db model.DB) *DeviceQuery",
+			"type DeviceCollection []*Device",
 		},
 		"service.go": {
-			"db     *data.DB",
-			"func NewFcmService(db *data.DB) *FcmService",
-			"Fcms(s.db).New()",
-			"Fcms(s.db).WhereKey(",
-			") (*Fcm, error)",
-			") ([]*Fcm, error)",
+			"db      *data.DB",
+			"func NewDeviceService(db *data.DB, cfg Config) (*DeviceService, error)",
+			"Devices(s.db).New()",
+			"Devices(s.db).Where(",
+			"Devices(s.db).WhereKey(",
 		},
 		"module.go": {
-			"NewFcmService(db)",
+			"NewDeviceService(db, cfg)",
 		},
 	}
 	for path, required := range wants {
@@ -172,8 +171,8 @@ func TestThePackageUsesTheGeneratedConcreteModel(t *testing.T) {
 				t.Errorf("%s still spells the generic model layer %q", filepath.ToSlash(relative), stale)
 			}
 		}
-		if relative != "FcmQuery.go" && strings.Contains(string(body), generatedHeading) {
-			t.Errorf("%s carries the heading of the generated query, which only FcmQuery.go may", filepath.ToSlash(relative))
+		if relative != "DeviceQuery.go" && strings.Contains(string(body), generatedHeading) {
+			t.Errorf("%s carries the heading of the generated query, which only DeviceQuery.go may", filepath.ToSlash(relative))
 		}
 		return nil
 	})
@@ -191,18 +190,18 @@ func TestTheGuidesTeachTheGeneratedModelBoundary(t *testing.T) {
 
 	root := packageRoot(t)
 	guides := map[string][]string{
-		"AGENTS.md":                           {"Fcms(db)", "security.Authorize"},
-		"README.md":                           {"Fcms(db)", "FcmQuery", "aru model:build", "RequireAuth"},
-		"CONTRIBUTING.md":                     {"Fcms(db)", "authorizes before reaching the Model", "aru model:build"},
+		"AGENTS.md":                           {"Devices(db)", "security.Authorize"},
+		"README.md":                           {"Devices(db)", "DeviceQuery", "aru model:build", "RequireAuth"},
+		"CONTRIBUTING.md":                     {"Devices(db)", "authorizes before reaching the Model", "aru model:build"},
 		"SECURITY.md":                         {"Model terminal", "data.Tenant(g)"},
-		".agents/skills/README.md":            {"FcmQuery", "custom block"},
-		".agents/skills/fcm-module/SKILL.md":  {"fcmTable", "ctx.User()", "RequireAuth", "return err"},
-		".agents/skills/fcm-policy/SKILL.md":  {"security.Authorize", "Fcms(s.db).New()"},
+		".agents/skills/README.md":            {"DeviceQuery", "custom block"},
+		".agents/skills/fcm-module/SKILL.md":  {"deviceTable", "ctx.User()", "RequireAuth", "return err"},
+		".agents/skills/fcm-policy/SKILL.md":  {"security.Authorize", "Devices(s.db).New()"},
 		".agents/skills/fcm-release/SKILL.md": {"model:build --check", "configured copy"},
 		".agents/skills/fcm-package/SKILL.md": {"RequireAuth", "/auth/login"},
 	}
 	retired := []string{
-		"FcmRepository", "NewFcmRepository", "repository.go  data access",
+		"DeviceRepository", "NewDeviceRepository", "repository.go  data access",
 		genericModel, genericBuilder, genericInstance,
 		"Model-first", "configured Model",
 		"m.answer(", "m.subject(", "Config.Tenant", "cfg.Auth.Tenant",

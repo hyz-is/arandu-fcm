@@ -1,6 +1,6 @@
 ---
 name: fcm-module
-description: Change what this Arandu package registers — its routes, handlers, configuration, response shape or schema. Use when the request is to "add a route", "add an endpoint", "add a handler", "add a config option", "change the prefix", "add a field to the response", "add a column", "write a migration", "return the tenant id too", "add a background job to the package", "make it run something at boot", "add a scope", "add a rule to the entity", "regenerate the query", "who is the current user in a handler", "return 404", or when a change touches module.go, config.go, model.go or FcmQuery.go. Covers foundation.Module and the five optional interfaces beside it, why handlers are thin, the RequireAuth guard and ctx.User, returning errors for the router to answer, the generated query and aru model:build, where the rules of the entity live, the migration name that carries the order, and what Resource is for.
+description: Change what this Arandu package registers — its routes, handlers, configuration, response shape or schema. Use when the request is to "add a route", "add an endpoint", "add a handler", "add a config option", "change the prefix", "add a field to the response", "add a column", "write a migration", "return the tenant id too", "add a background job to the package", "make it run something at boot", "add a scope", "add a rule to the entity", "regenerate the query", "who is the current user in a handler", "return 404", or when a change touches module.go, config.go, model.go or DeviceQuery.go. Covers foundation.Module and the five optional interfaces beside it, why handlers are thin, the RequireAuth guard and ctx.User, returning errors for the router to answer, the generated query and aru model:build, where the rules of the entity live, the migration name that carries the order, and what Resource is for.
 license: MIT
 ---
 
@@ -12,8 +12,9 @@ calls `New`, gets something that satisfies it, and registers it by hand.
 
 ```go
 var (
-	_ foundation.Module     = (*Module)(nil)
-	_ foundation.Migratable = (*Module)(nil)
+	_ foundation.Module      = (*Module)(nil)
+	_ foundation.Migratable  = (*Module)(nil)
+	_ foundation.Schedulable = (*Module)(nil)
 )
 ```
 
@@ -23,7 +24,7 @@ here rather than at the registration in somebody else's repository.
 
 ## Taking on more than routes
 
-Six interfaces sit beside `Module` in `framework/foundation`, one of which this
+Six interfaces sit beside `Module` in `framework/foundation`, two of which this
 package already implements, and each is opted into the same way — by
 implementing it. Confirm the set for the version in `go.mod` with:
 
@@ -36,14 +37,15 @@ go doc github.com/arandu-io/framework/foundation
 | --- | --- |
 | `Bootable` | prepare state once, at boot |
 | `Background` | run a loop of the module's own |
-| `Schedulable` | declare work for the scheduler |
+| `Schedulable` | declare work for the scheduler — this package implements it, for the clean of stale devices |
 | `Migratable` | own tables — this package implements it |
 | `Health` | report on the storage it depends on |
 | `Closable` | give resources back at shutdown |
 
 Two of them change what `arandu.mod.toml` has to say. A `Background` loop that
-calls out needs `network = true`; anything that writes a file needs
-`filesystem = true`. Declare it in the same commit as the code, or
+calls out needs `network = true` (this package declares it already, for
+Firebase); anything that reads or writes a file needs `filesystem = true` (this
+package reads the service account file). Declare it in the same commit as the code, or
 `TestTheDeclaredCapabilitiesAreWhatTheCodeDoes` fails and names which of the
 four it was. Nothing downstream would have caught it: `aru doctor` reads the
 application's own tree and never opens an installed package.
@@ -53,10 +55,11 @@ application's own tree and never opens an installed package.
 **1. Register it in `Routes`, with a name.**
 
 ```go
-	r.Action(stdhttp.MethodDelete, m.cfg.Prefix+"/{id}", m.destroy).Name("fcm.destroy")
+	r.Action(stdhttp.MethodGet, p+"/{id}", m.show).Name("fcm.devices.show")
 ```
 
-Below the line that is already there, and nowhere above it:
+Below the line that is already there, and nowhere above it (the early return for
+`Config.Routes` off stays above both):
 
 ```go
 	r = r.Group("", middleware.RequireAuth(m.sessions))
@@ -71,8 +74,8 @@ registered before the guard is mounted.
 The name is what a URL is built from. Two spellings of one address disagree, and
 the failure when they do is a link to a 404. The prefix is `m.cfg.Prefix` and
 never a literal: the application decides where the package is mounted, and
-`TestTheModuleRegistersItsRoutesUnderItsPrefix` at
-`tests/Feature/routes_test.go:210` mounts it at `/widgets` and fails if any
+`TestTheRoutesAreUnderThePrefixAndOutsideTheFrameworkNamespace` in
+`tests/Feature/routes_test.go` mounts it at `/mobile/devices` and fails if any
 route came out anywhere else, or if `everyRoute` does not reach it. It also
 asserts every route is tagged with the module name, which is what
 `aru route:list` groups by.
@@ -83,7 +86,7 @@ service, answer:
 ```go
 func (m *Module) destroy(ctx *fhttp.Context) error {
 	who, _ := ctx.User()
-	if err := m.svc.Delete(ctx.Ctx(), who, ctx.Param("id")); err != nil {
+	if err := m.devices.UnregisterID(ctx.Ctx(), who, ctx.Param("id")); err != nil {
 		return err
 	}
 	return ctx.Status(stdhttp.StatusNoContent)
@@ -101,7 +104,7 @@ what it is handed, so a nil resource panics inside the framework rather than
 answering 204.
 
 No rule and no Model construction lives in a handler. A handler that held the
-database or called `Fcms` would bypass the only place the Policy is
+database or called `Devices` would bypass the only place the Policy is
 guaranteed to run. Read `fcm-policy` before writing the Service method.
 
 **3. Return the error; the router answers it.** The handler writes `return err`
@@ -128,20 +131,20 @@ time, and the reason is in the log, where the person operating the system reads
 it and the person probing it does not.
 
 `ErrNotFound` is a 404 because it wraps `model.ErrModelNotFound`;
-`TestTheMissingRecordIsTheModelsNotFound` holds that. A failure of the module's
+`TestTheMissingDeviceIsTheModelsNotFound` holds that. A failure of the module's
 own that should answer some other status is an error type with an
 `HTTPStatus() int` method, never a `switch` in the handler.
 `TestHandlersLeaveTheSubjectAndTheStatusToTheFramework` fails on a handler that
 calls `errors.Is` or `errors.As`, `fhttp.Refuse`, `fhttp.Reject` or
 `http.Error`.
 
-**4. Add the case to the route tests.** `everyRoute` at
-`tests/Feature/routes_test.go:118` is a table of every route.
+**4. Add the case to the route tests.** `everyRoute` in
+`tests/Feature/routes_test.go` is a table of every route.
 `TestAVisitorWithNoSessionIsSentToSignIn` asserts each one sends a request with
-no session to `/auth/login`, and `TestASignedInSubjectReachesThePolicyAndIsRefused`
-asserts each one answers a signed-in administrator 403 from the closed policy.
-Both run against `data.Wrap(nil, data.DialectSQLite)` — a handle over no
-database — so a route that got past the policy panics rather than passes.
+no session to `/auth/login`, and `TestASubjectWithoutTheActionGets403OnTheRoutes`
+asserts each one answers a signed-in subject that carries no action 403 from the
+policy. The feature suite runs on a real SQLite database, so a route that
+writes something it should not is caught by the rows it leaves.
 
 ## Where the subject comes from
 
@@ -160,14 +163,14 @@ to serve without any session is a `security.Guest` the code declares on purpose
 
 ## Changing the Model
 
-`Fcm` embeds `model.Model`, and `fcmTable` declares its table once,
+`Device` embeds `model.Model`, and `deviceTable` declares its table once,
 beside it in `model.go`. Keep the application-generated key and the tenant
 default visible there:
 
 ```go
-var fcmTable = model.NewTable(model.TableSpec{
-	Name:      "fcms",
-	New:       func() model.Entity { return new(Fcm) },
+var deviceTable = model.NewTable(model.TableSpec{
+	Name:      "fcm_devices",
+	New:       func() model.Entity { return new(Device) },
 	ManualKey: true,
 })
 ```
@@ -178,8 +181,8 @@ package owns tenant data. Model terminals require a Grant and apply `tenant_id`;
 the Service still calls `security.Authorize` first because the Model does not
 decide which Policy action the Grant represents.
 
-`FcmQuery.go` is generated from that declaration: `Fcms(db)`, the
-`*FcmQuery` it returns, and `FcmCollection`. It is never edited by
+`DeviceQuery.go` is generated from that declaration: `Devices(db)`, the
+`*DeviceQuery` it returns, and `DeviceCollection`. It is never edited by
 hand. After changing the struct or the table, run
 
 ```sh
@@ -189,7 +192,7 @@ aru model:build
 and commit what it rewrote. `aru model:build --check` writes nothing and exits 1
 when the file is missing, stale or hand-edited.
 
-Every query starts at `Fcms(s.db)`. The constructor returns one mutable
+Every query starts at `Devices(s.db)`. The constructor returns one mutable
 query, so a second chain begun from a value held in a variable carries the
 clauses of the first — and compiles.
 
@@ -203,42 +206,42 @@ The rules of the entity itself go in the custom block of `model.go`: an
 invariant, a derived value, a transition that changes only the fields of the
 row, written as a pure method — no database, no network, no clock read inside,
 no Grant; a time it stamps arrives as a parameter. A guard and the transition it
-protects come as a pair:
+protects come as a pair when there is a guard; `Reassign` is the transition
+registering a known token performs:
 
 ```go
 // arandu:begin custom
 
-// CanRename reports whether the record may take this name.
-func (s Fcm) CanRename(name string) bool { return name != "" && name != s.Name }
-
-// Rename gives the record a new name, and refuses one it cannot take.
-func (s *Fcm) Rename(name string) error {
-	if !s.CanRename(name) {
-		return fmt.Errorf("fcm: %q cannot be the new name of this record", name)
-	}
-	s.Name = name
-	return nil
+// Reassign gives the device to another user and refreshes what the
+// installation says about itself, as registering a token already known does.
+func (d *Device) Reassign(userID string, platform Platform, app, locale string, now time.Time) {
+	d.UserID = userID
+	d.Platform = platform
+	d.App = app
+	d.Locale = locale
+	d.LastSeenAt = now
+	d.UpdatedAt = now
 }
 
 // arandu:end custom
 ```
 
-A local scope is a method on `*FcmQuery` in the same block, and a relation
-is registered on `fcmTable` from an `init` function:
+A local scope is a method on `*DeviceQuery` in the same block, and a relation
+is registered on `deviceTable` from an `init` function:
 
 ```go
-// Named narrows the query to the records with this name.
-func (q *FcmQuery) Named(name string) *FcmQuery {
-	return q.Where("name", "=", name)
+// ForApp narrows the query to the devices registered by this application id.
+func (q *DeviceQuery) ForApp(app string) *DeviceQuery {
+	return q.Where("app", "=", app)
 }
 ```
 
 The Service orchestrates around them: it validates the request, asks the Policy
 for the Grant, calls the rule, and saves with that Grant.
 
-This table declares `created_at` but not `updated_at`. The Hesape Model stamps a
-timestamp only when the entity declares its column, so creation remains correct
-without changing the published migration or disabling timestamps globally.
+The Hesape Model stamps `created_at` and `updated_at` when it saves, because the
+entity declares both columns; `last_seen_at` is the module's own and is set from
+the configured clock, so the tests move it.
 
 ## Adding a configuration field
 
@@ -254,30 +257,35 @@ Three things move together for every new field.
   `Validate` before anything else, so a setting that cannot work fails where it
   is wired rather than on the first request that needed it.
 - **A default in `withDefaults`**, as a named constant beside `DefaultPrefix`
-  and `DefaultPageSize`, if zero is meant to mean something. `withDefaults` runs
+  and `DefaultTries`, if zero is meant to mean something. `withDefaults` runs
   *after* `Validate` and never before: filling a default in first hides the
   value somebody actually wrote from the check that would have refused it.
 
 A value out of range is refused rather than clamped. A number somebody wrote and
 did not get is worse than a number somebody wrote and was told about — that is
-why `PageSize` above `MaxPageSize` is an error and not a silent 200.
+why `MaxDevicesPerUser` above `MaxDevicesPerUserLimit` is an error and not a
+silent 50.
 
-Add the case to `TestTheConfigurationRefusesWhatCannotWork` at
-`tests/Unit/policy_test.go:298`, which is a map of named bad configurations, and
-to `TestNewRefusesAWiringThatCannotWork` at `tests/Feature/routes_test.go:267`
-if the field can make `New` fail.
+`Config` holds secrets, so a field that holds one is also left out of
+`Config.summary`, which is what every printed, logged and encoded form is built
+from, or is put there as `[redacted]`. Add the case to
+`TestTheConfigurationRefusesWhatCannotWork` in `tests/Unit/policy_test.go`,
+which is a map of named bad configurations, and to
+`TestNewRefusesAWiringThatCannotWork` in `tests/Feature/routes_test.go` if the
+field can make `New` fail.
 
 ## What may leave in a response
 
-`Resource` and `Collection` in `model.go` are declared snapshots, not direct
-encoding of the entity. This also defines the safe copy boundary: Model-backed
-Service results stay as `*Fcm`/`[]*Fcm`, because a copied row keeps
+`DeviceResource` and `DevicesResource` in `model.go` are declared snapshots, not
+direct encoding of the entity. This also defines the safe copy boundary:
+Model-backed Service results stay as `*Device`/`[]*Device`, because a copied row keeps
 the model of the original and refuses to be written. A response snapshot reads
 only the explicit fields and cannot be saved.
 
 An encoder handed the entity would answer with whatever fields it happens to
 have, including the embedded Model and anything added later without opening the
-handler. `TenantID` names another customer's identifier and belongs in no
+handler. `TenantID` names another customer's identifier, and `Token` and
+`TokenHash` are the sealed registration token and its digest; none belongs in a
 response.
 
 So a new column that should be visible is added in two places: the struct in
@@ -286,20 +294,10 @@ is added in one.
 
 `With()` is what goes *beside* the fields at the top level. `ctx.JSON` puts what
 `ToArray` returns under a fixed `"data"` key and merges what `With` returns next
-to it, so `Collection` answers `{"data": {"items": [...]}, "next_cursor": "..."}`.
-The cursor describes the answer rather than the things answered with. A resource
-with nothing to add returns nil.
-
-The cursor is only offered for a full page:
-
-```go
-	if len(records) == m.cfg.PageSize {
-		cursor = records[len(records)-1].ID
-	}
-```
-
-A short page is the last one, and offering a cursor for it offers a next page
-that comes back empty.
+to it, so `DevicesResource` answers `{"data": {"items": [...]}}`. A resource with
+nothing to add returns nil. The list of one user's phones has no next page, so it
+carries no cursor; a listing that could grow past one page would add a
+`next_cursor` here, offered only for a full page.
 
 ## Adding a migration
 
@@ -307,13 +305,13 @@ Append it to the slice `Migrations()` returns, and give it a name that sorts
 after the last one:
 
 ```go
-func (createFcms) GetName() string { return "20260823_0001_create_fcms" }
+func (createDevices) GetName() string { return "20261031_0001_create_fcm_devices" }
 ```
 
-**The name carries the order and nothing else does.** `TestTheModuleDeclaresItsSchema`
-at `tests/Feature/routes_test.go:301` requires the returned names to be sorted,
-requires none to be empty, and requires every one to satisfy
-`migrations.ReversibleMigration` — the migrator finds `Down` by type assertion,
+**The name carries the order and nothing else does.**
+`TestTheModuleDeclaresItsSchemaAndRollsItBack` in `tests/Feature/devices_test.go`
+holds the name of the migration, the compile-time assertion in `module.go`
+requires every one to satisfy `migrations.ReversibleMigration` — the migrator finds `Down` by type assertion,
 so a `Down` with the wrong signature is a rollback that silently does nothing.
 
 Three rules the existing migration keeps:

@@ -6,16 +6,21 @@
 # four lines below worth reading before installing anything.
 
 name = "hyz-is/fcm"
-framework = ">= 0.66"
+framework = ">= 0.67"
 profiles = ["conventional", "performance"]
 
 [permissions]
-# It answers requests and reads its own rows. Nothing leaves the process.
-network = false
-# It keeps no state outside the database.
-filesystem = false
+# It pushes to phones: client.go calls the Firebase Cloud Messaging v1 API
+# (fcm.googleapis.com) and the OAuth2 token address of the service account
+# (oauth2.googleapis.com), and nothing else. Both are https; a loopback address
+# is accepted for an emulator or a test server.
+network = true
+# It reads the service account JSON from the path in FCM_CREDENTIALS_FILE or
+# GOOGLE_APPLICATION_CREDENTIALS when the application asks for it, and keeps no
+# state outside the database.
+filesystem = true
 # It runs no other program.
 exec = false
-# module.go owns the fcms table, so whoever installs this has to run
+# module.go owns the fcm_devices table, so whoever installs this has to run
 # `aru migrate`. Declaring it is how they find that out before deploying.
 migrations = true

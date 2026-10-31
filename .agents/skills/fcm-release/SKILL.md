@@ -38,7 +38,7 @@ project: no go.mod, main.go and arandu.toml together"* — it reads applications
 and this is a library.
 
 `aru model:build` is different: it works on a module root, and it is what wrote
-`FcmQuery.go`. Run it after any change to the entity, and before a release
+`DeviceQuery.go`. Run it after any change to the entity, and before a release
 
 ```sh
 aru model:build --check
@@ -49,14 +49,11 @@ edited by hand. It needs the `aru` binary rather than the Go toolchain alone,
 which is why it sits beside the four gates and not among them.
 
 CI runs the same four, and so does the release workflow on the tagged archive.
-Both also run `go vet configure.go` by name while their template sections are
-still in them, because the build tag on that file keeps it out of `./...`.
 
-The template has two build subjects, and both are release gates: the raw clone
-and a clean copy after `configure.go` substitutes every name. Run build, vet,
-and race on both. Preserve a built configurator long enough to invoke it again
-inside the configured copy; it must refuse and the tree hash must be identical
-before and after that refusal.
+This repository is a configured copy of the package template
+(`arandu-io/package-skeleton`): its first commit is the template's, its second is
+the configuration, and `configure.go` and the sections marked for the template
+are gone. The gates of the template itself belong to the template's repository.
 
 ## What the manifest declares, and who reads it
 
@@ -67,12 +64,12 @@ opened by nothing but that package's own suite.
 
 ```toml
 name = "hyz-is/fcm"
-framework = ">= 0.66"
+framework = ">= 0.67"
 profiles = ["conventional", "performance"]
 
 [permissions]
-network = false
-filesystem = false
+network = true
+filesystem = true
 exec = false
 migrations = true
 ```
@@ -95,8 +92,10 @@ own code; here both fail the suite, because `go test` has one outcome:
 | `permission-not-used` | warning | the manifest says `true` and nothing does it. Asking for more than you need is how a permission model erodes into everyone declaring everything |
 
 So a dependency or a call added here is a line changed in `arandu.mod.toml` in
-the same commit. `migrations = true` is the one this package already declares,
-and it is what tells an installer to run `aru migrate` before deploying.
+the same commit. This package declares `network` (client.go calls Firebase and
+its OAuth2 address, nothing else), `filesystem` (it reads the service account
+file when the application points it at one) and `migrations` (what tells an
+installer to run `aru migrate` before deploying), and not `exec`.
 
 The `framework` line is a floor, and it is a second declaration of something
 `go.mod` already says. Move both together when you bump.
@@ -108,7 +107,8 @@ second `require` is a download and an audit surface for every project that
 installs the package, and the framework's own rule is a core with no third-party
 dependency beyond `golang.org/x/crypto`.
 
-What is already here is the framework and the components module it is built on:
+What is already here is the framework and hesape it is built on, and the SQLite
+connector the tests run on; a JWT and two POSTs do not need Google's SDK:
 
 ```sh
 export GOWORK=off
@@ -130,6 +130,8 @@ Before tagging:
 
 - the four gates pass with `GOWORK=off`;
 - `aru model:build --check` finds nothing to change;
+- the repository was created from the template as `hyz-is/arandu-fcm`, and
+  releases are tags on `main`, moved by fast-forward from `develop`;
 - `arandu.mod.toml` matches the code;
 - `CHANGELOG.md` has the entry, under the version, in the Keep a Changelog
   sections — `Added`, `Changed`, `Fixed`, `Removed`.
@@ -143,8 +145,8 @@ it is, and what they have to write instead.
 Run `apidiff` against the release baseline and enumerate every removal; the CI
 step named `api diff against the last release` fails unless `UPGRADE.md` names
 each one. A move to a new shape of the model breaks more than its own
-signatures: `Fcms` changing what it returns is one line, and every method
-the old embedded model promoted on `*Fcm` that the new one does not is
+signatures: `Devices` changing what it returns is one line, and every method
+the old embedded model promoted on `*Device` that the new one does not is
 another, each named on its own. Keeping `ErrNotFound` in `model.go` is not a
 removal just because its value changed.
 
@@ -155,9 +157,11 @@ worth a line in the changelog:
   template somebody else wrote.
 - **A migration name.** Changing what an applied name means leaves the change
   missing everywhere it already ran, and nothing says so.
-- **A default.** `DefaultPrefix` and `DefaultPageSize` are what an application
-  gets by leaving the field empty, so moving one moves behaviour in every
-  project that never mentioned it.
+- **A default.** `DefaultPrefix`, `DefaultTries`, `DefaultMaxDevicesPerUser`
+  and `DefaultStaleAfterDays` are what an application gets by leaving the field
+  empty, so moving one moves behaviour in every project that never mentioned it.
+- **What Firebase's answers do.** Which answers remove a device and which are
+  retried is behaviour an installer relies on without ever calling it.
 
 ## Reporting a vulnerability
 
@@ -165,5 +169,7 @@ Not in an issue and not in a pull request. `SECURITY.md` has the private
 advisory address. Anything that lets a caller reach data a policy did not
 authorize is in scope — a handler that reaches a Model or database directly, a
 route outside `RequireAuth`, a Model terminal before `Authorize`, disabled
-tenant scope, a `Grant` produced without a Policy returning nil, or a field
-reaching a response that `Resource` does not list.
+tenant scope, a `Grant` produced without a Policy returning nil, a field
+reaching a response that `DeviceResource` does not list, or a service account
+key, access token or registration token reaching a log line, an error or a
+JSON encoding.

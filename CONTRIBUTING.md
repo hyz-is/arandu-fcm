@@ -14,12 +14,16 @@ go vet ./...
 go test -race ./...
 ```
 
+The feature suite also runs against PostgreSQL when `FCM_TEST_DATABASE_URL`
+names a server (one schema per test, dropped afterwards); a change that touches
+the schema or a query is not done until it passes there too.
+
 The two filters on `gofmt` are not preference. `gofmt` is the only tool in the
 chain that ignores build tags, so it reads files the compiler deliberately
 excludes; `testdata/` holds fixtures that are invalid on purpose.
 
 A change to the entity in `model.go` is followed by `aru model:build`, which
-rewrites `FcmQuery.go`, and the regenerated file goes in the same commit.
+rewrites `DeviceQuery.go`, and the regenerated file goes in the same commit.
 `aru model:build --check` exits 1 when the committed file is missing, stale or
 edited by hand.
 
@@ -30,23 +34,31 @@ one of them will not be merged, whatever else it improves.
 
 1. **The policy denies by default.** No branch allows every action, and none is
    added. Opening an action means writing the rule that opens it.
-2. **Every Service method authorizes before reaching the Model.** The Grant is
-   then required by the Model terminal; constructing `Fcms(db)` first is
-   already the wrong order and the structural audit rejects it.
+2. **Every function that reaches the Model
+   authorizes before reaching the Model.** A person's use case calls `security.Authorize`; the work done for a
+   push or the clean checks the Grant it was handed. The Grant is then required
+   by the Model terminal; constructing `Devices(db)` first is already the wrong
+   order and the structural audit rejects it.
 3. **The tenant comes from `data.Tenant(g)`.** Not from the path, the body, the
    query string or a header, on any code path, including the read paths.
 4. **`arandu.mod.toml` matches the code.** Adding an outbound call, a file
-   write or a process means declaring it there in the same commit.
+   read or write, or a process means declaring it there in the same commit.
+5. **No secret leaves.** The service account, the application key and the
+   registration tokens appear in no log line, error, `String()` or JSON. A new
+   type that holds one prints, logs and encodes as `[redacted]`, and a new error
+   built from text a provider sent goes through the scrubber in `client.go`.
+6. **Only `client.go` speaks HTTP.** The rest of the package reaches Firebase
+   through `Sender`.
 
-CRUD stays on `Fcms(db)` and its generated query. Add a Repository only for
+CRUD stays on `Devices(db)` and its generated query. Add a Repository only for
 a specialized complex query, read model, report, export or raw SQL contract; a
 wrapper around `Find`, `Get`, `Save` or `Delete` is a second data path.
 
-Every query starts at `Fcms(s.db)`. The constructor returns one mutable
+Every query starts at `Devices(s.db)`. The constructor returns one mutable
 query, so a second chain begun from a value held in a variable carries the
 clauses of the first -- and that compiles.
 
-Model-backed entities stay pointers. A copy of `Fcm` keeps the model of the
+Model-backed entities stay pointers. A copy of `Device` keeps the model of the
 row it was copied from, and the model refuses to write through the copy with
 `model.ErrUnwired`. Response resources are the deliberate snapshot boundary;
 Service results are not.

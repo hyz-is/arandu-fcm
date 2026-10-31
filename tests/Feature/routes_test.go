@@ -2,344 +2,299 @@ package feature_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/arandu-io/framework/data"
 	fhttp "github.com/arandu-io/framework/http"
 	"github.com/arandu-io/framework/http/middleware"
 	"github.com/arandu-io/framework/security"
-	"github.com/arandu-io/hesape/database/migrations"
-	hhttp "github.com/arandu-io/hesape/http"
 
 	fcm "github.com/hyz-is/arandu-fcm"
 )
 
-// These tests drive the module the way an application does: build it, register
-// its routes on a router, and make a request.
-//
-// The database handle wraps nothing, and that is the assertion. A request that
-// reached a statement would panic, so every answer below is proof that the
-// refusal happened in the guard or the policy and not after a read.
-
-// appKey is the key a session store is built over. Any thirty-two bytes will
-// do here; a real application reads its own from the environment.
-const appKey = "0123456789abcdef0123456789abcdef"
-
 // reservedPrefix is the namespace the framework keeps for itself: the health
 // probe, the reload endpoint, the development console, the addressed assets.
-//
 // A module that registers under it is refused when the application boots, by
-// name -- and that refusal happens in the process of whoever installed this
-// package, after it was published. Here the same rule is a failing test, in the
-// repository that can still fix it.
+// name -- in the process of whoever installed this package, after it was
+// published. Here the same rule is a failing test, in the repository that can
+// still fix it.
 const reservedPrefix = "/_arandu"
 
-// mounted is the module registered on a router the way the kernel builds one,
-// with the session store its guard reads and the flash its router answers a
-// rejected input with.
-type mounted struct {
-	router   *fhttp.Router
-	sessions *security.SessionStore
-	flash    *security.Flash
-}
-
-// mount builds the module and returns a router with its routes registered.
-func mount(t *testing.T, cfg fcm.Config) mounted {
+func routed(t *testing.T) *world {
 	t.Helper()
-
-	sessions := security.NewSessionStore([]byte(appKey), time.Hour, false, security.NewMemoryBackend())
-	// The session keeps who signed in; the roles are the application's to
-	// answer on every request, the way an application wires its accounts.
-	sessions.ResolveSubjects(func(_ context.Context, who security.Subject) (security.Subject, error) {
-		if admin := administrator(); who.ID == admin.ID && who.Tenant == admin.Tenant {
-			return admin, nil
-		}
-		return security.Subject{}, hhttp.ErrSubjectGone
-	})
-	flash := security.NewFlash([]byte(appKey), false)
-
-	module, err := fcm.New(cfg, data.Wrap(nil, data.DialectSQLite), sessions)
-	if err != nil {
-		t.Fatalf("building the module: %v", err)
-	}
-
-	// WithFlash is what the kernel does at boot. Without it the router has
-	// nowhere to put a rejected input and answers it as a failure.
-	router := fhttp.NewRouter().WithFlash(flash)
-	module.Routes(router.ForModule(module.Name()))
-	return mounted{router: router, sessions: sessions, flash: flash}
+	return install(t, false, func(c *fcm.Config) { c.Routes = true })
 }
 
-// administrator is the most privileged subject an application can produce.
-func administrator() security.Subject {
-	return security.Subject{ID: "user-1", Tenant: "acme", Roles: []string{"admin"}, Verified: true}
-}
-
-// signIn starts a session for the subject's account and returns the cookies a
-// browser would send back with the next request. Only the account is written
-// to the session; its roles come back through the store's resolver.
-func (m mounted) signIn(t *testing.T, subject security.Subject) []*http.Cookie {
-	t.Helper()
-
+// signIn starts a session for the subject and returns the cookies a client
+// would send back.
+func (w *world) signIn(who security.Subject) []*http.Cookie {
+	w.t.Helper()
 	rec := httptest.NewRecorder()
-	who := security.Subject{ID: subject.ID, Tenant: subject.Tenant}
-	if _, err := m.sessions.Start(context.Background(), rec, who); err != nil {
-		t.Fatalf("starting a session: %v", err)
+	if _, err := w.sessions.Start(context.Background(), rec, security.Subject{ID: who.ID, Tenant: who.Tenant}); err != nil {
+		w.t.Fatal(err)
 	}
-	cookies := rec.Result().Cookies()
-	if len(cookies) == 0 {
-		t.Fatal("starting a session wrote no cookie")
-	}
-	return cookies
+	return rec.Result().Cookies()
 }
 
-// answer makes one request against the router and returns the recorder.
-//
-// A panic out of the router is a failure of this test rather than of the run:
-// it is how an error nobody claimed arrives here, and reporting it by name says
-// which request produced it.
-func (m mounted) answer(t *testing.T, method, target, body string, cookies ...*http.Cookie) (rec *httptest.ResponseRecorder) {
-	t.Helper()
-
+// call makes a JSON request against the router.
+func (w *world) call(method, target, body string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
+	w.t.Helper()
 	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	req.Header.Set("Accept", "application/json")
 	if body != "" {
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Content-Type", "application/json")
 	}
-	for _, cookie := range cookies {
-		req.AddCookie(cookie)
+	for _, c := range cookies {
+		req.AddCookie(c)
 	}
-	rec = httptest.NewRecorder()
+	rec := httptest.NewRecorder()
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			t.Fatalf("%s %s panicked, which a deployed router answers with 500: %v", method, target, recovered)
+			w.t.Fatalf("%s %s panicked, which a deployed router answers with 500: %v", method, target, recovered)
 		}
 	}()
-	m.router.ServeHTTP(rec, req)
+	w.router.ServeHTTP(rec, req)
 	return rec
 }
 
-// everyRoute is a request to each route the module registers, under the
-// default prefix. TestTheModuleRegistersItsRoutesUnderItsPrefix fails when a
-// route exists that this list does not reach.
-var everyRoute = []struct {
-	method string
-	target string
-	body   string
-}{
+var everyRoute = []struct{ method, target, body string }{
 	{http.MethodGet, fcm.DefaultPrefix, ""},
-	{http.MethodGet, fcm.DefaultPrefix + "/record-1", ""},
-	{http.MethodPost, fcm.DefaultPrefix, "name=one"},
+	{http.MethodPost, fcm.DefaultPrefix, `{"token":"` + deviceToken + `","platform":"android"}`},
+	{http.MethodPost, fcm.DefaultPrefix + "/unregister", `{"token":"` + deviceToken + `"}`},
+	{http.MethodDelete, fcm.DefaultPrefix + "/device-1", ""},
+}
+
+func TestTheRoutesAreOffUnlessAskedFor(t *testing.T) {
+	t.Parallel()
+	w := install(t, false, nil)
+	if n := len(w.router.Routes()); n != 0 {
+		t.Fatalf("the module registered %d routes without being asked", n)
+	}
 }
 
 func TestAVisitorWithNoSessionIsSentToSignIn(t *testing.T) {
 	t.Parallel()
-
-	m := mount(t, fcm.Config{})
-
-	// RequireAuth answers before the handler runs, so a visitor with no
-	// session reaches neither the policy nor the database: the answer is the
-	// sign-in screen, not a refusal from a policy that was asked about nobody.
-	for _, request := range everyRoute {
-		rec := m.answer(t, request.method, request.target, request.body)
+	w := routed(t)
+	for _, r := range everyRoute {
+		req := httptest.NewRequest(r.method, r.target, strings.NewReader(r.body))
+		rec := httptest.NewRecorder()
+		w.router.ServeHTTP(rec, req)
 		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != middleware.SignInPath {
-			t.Errorf("%s %s answered %d to %q, want %d to %s",
-				request.method, request.target, rec.Code, rec.Header().Get("Location"),
-				http.StatusSeeOther, middleware.SignInPath)
+			t.Errorf("%s %s answered %d to %q, want %d to %s", r.method, r.target, rec.Code,
+				rec.Header().Get("Location"), http.StatusSeeOther, middleware.SignInPath)
+		}
+	}
+	if w.count(acme) != 0 {
+		t.Fatal("a visitor wrote a row")
+	}
+}
+
+func TestTheAppRegistersListsAndRemovesItsToken(t *testing.T) {
+	t.Parallel()
+	w := routed(t)
+	ada := w.signIn(member(acme, "ada"))
+
+	// The body names a tenant and a user, as a client that tries to choose
+	// whose phone this is would. Neither is read.
+	rec := w.call(http.MethodPost, fcm.DefaultPrefix,
+		`{"token":"`+deviceToken+`","platform":"android","app":"com.example.app","locale":"pt-BR","tenant_id":"`+globex+`","user_id":"bob"}`, ada...)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("register answered %d: %s", rec.Code, rec.Body)
+	}
+	if strings.Contains(rec.Body.String(), deviceToken) {
+		t.Fatalf("the response carries the token: %s", rec.Body)
+	}
+	var envelope struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	created := envelope.Data
+	if created["platform"] != "android" || created["user_id"] != "ada" || created["app"] != "com.example.app" {
+		t.Fatalf("response = %v", created)
+	}
+	if w.count(acme) != 1 || w.count(globex) != 0 {
+		t.Fatalf("rows: acme %d, globex %d: the tenant came from the body", w.count(acme), w.count(globex))
+	}
+
+	// Registering again is the same device.
+	if rec := w.call(http.MethodPost, fcm.DefaultPrefix, `{"token":"`+deviceToken+`","platform":"android"}`, ada...); rec.Code != http.StatusOK {
+		t.Fatalf("second register answered %d: %s", rec.Code, rec.Body)
+	}
+	if w.count(acme) != 1 {
+		t.Fatalf("%d rows after registering twice", w.count(acme))
+	}
+
+	rec = w.call(http.MethodGet, fcm.DefaultPrefix, "", ada...)
+	var list struct {
+		Data struct {
+			Items []map[string]any `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil || rec.Code != http.StatusOK || len(list.Data.Items) != 1 {
+		t.Fatalf("list answered %d %s (%v)", rec.Code, rec.Body, err)
+	}
+	if strings.Contains(rec.Body.String(), deviceToken) || strings.Contains(rec.Body.String(), "token") {
+		t.Fatalf("the list carries a token: %s", rec.Body)
+	}
+
+	if rec := w.call(http.MethodPost, fcm.DefaultPrefix+"/unregister", `{"token":"`+deviceToken+`"}`, ada...); rec.Code != http.StatusNoContent {
+		t.Fatalf("unregister answered %d: %s", rec.Code, rec.Body)
+	}
+	if w.count(acme) != 0 {
+		t.Fatal("the device is still there")
+	}
+}
+
+func TestTheAppRemovesADeviceByItsID(t *testing.T) {
+	t.Parallel()
+	w := routed(t)
+	ada, bob := w.signIn(member(acme, "ada")), w.signIn(member(acme, "bob"))
+	d := w.register(member(acme, "ada"), deviceToken, "android")
+
+	if rec := w.call(http.MethodDelete, fcm.DefaultPrefix+"/"+d.ID, "", bob...); rec.Code != http.StatusNotFound {
+		t.Fatalf("bob removing ada's phone answered %d, want 404", rec.Code)
+	}
+	if w.count(acme) != 1 {
+		t.Fatal("bob removed ada's phone")
+	}
+	if rec := w.call(http.MethodDelete, fcm.DefaultPrefix+"/"+d.ID, "", ada...); rec.Code != http.StatusNoContent {
+		t.Fatalf("ada removing her phone answered %d", rec.Code)
+	}
+	if rec := w.call(http.MethodDelete, fcm.DefaultPrefix+"/"+d.ID, "", ada...); rec.Code != http.StatusNotFound {
+		t.Fatalf("removing it again answered %d, want 404", rec.Code)
+	}
+}
+
+func TestARejectedRegistrationIsAnUnprocessableEntity(t *testing.T) {
+	t.Parallel()
+	w := routed(t)
+	ada := w.signIn(member(acme, "ada"))
+
+	rec := w.call(http.MethodPost, fcm.DefaultPrefix, `{"token":"","platform":"palm"}`, ada...)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("answered %d: %s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "token") || !strings.Contains(rec.Body.String(), "platform") {
+		t.Fatalf("the answer names no field: %s", rec.Body)
+	}
+}
+
+func TestASubjectWithoutTheActionGets403OnTheRoutes(t *testing.T) {
+	t.Parallel()
+	w := routed(t)
+	w.resolve = func(who security.Subject) security.Subject {
+		return security.Subject{ID: who.ID, Tenant: who.Tenant, Verified: true}
+	}
+	eve := w.signIn(security.Subject{ID: "eve", Tenant: acme})
+	for _, r := range everyRoute {
+		if rec := w.call(r.method, r.target, r.body, eve...); rec.Code != http.StatusForbidden {
+			t.Errorf("%s %s answered %d for a subject with no action, want 403", r.method, r.target, rec.Code)
 		}
 	}
 }
 
-func TestASignedInSubjectReachesThePolicyAndIsRefused(t *testing.T) {
+func TestTheRoutesAreUnderThePrefixAndOutsideTheFrameworkNamespace(t *testing.T) {
 	t.Parallel()
+	w := install(t, false, func(c *fcm.Config) { c.Routes = true; c.Prefix = "/mobile/devices" })
 
-	m := mount(t, fcm.Config{})
-	cookies := m.signIn(t, administrator())
-
-	// The guard admits the session and puts its subject on the request; the
-	// handler hands it to the service, and the closed policy refuses it. The
-	// router turns that refusal into 403 -- before any statement, which the
-	// handle over no database would have panicked on.
-	for _, request := range everyRoute {
-		rec := m.answer(t, request.method, request.target, request.body, cookies...)
-		if rec.Code != http.StatusForbidden {
-			t.Errorf("%s %s answered %d for a signed-in administrator, want %d",
-				request.method, request.target, rec.Code, http.StatusForbidden)
-		}
-	}
-}
-
-func TestARejectedInputGoesBackBeforeTheDatabase(t *testing.T) {
-	t.Parallel()
-
-	m := mount(t, fcm.Config{})
-	cookies := m.signIn(t, administrator())
-
-	// The input is validated before anything is authorized, so this refusal
-	// comes from the request and not from the policy. The router answers it the
-	// way it answers every rejected form: back where it came from, with the
-	// messages in the flash -- and it still never reaches a statement.
-	rec := m.answer(t, http.MethodPost, fcm.DefaultPrefix, "name=", cookies...)
-	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/" {
-		t.Fatalf("an empty name answered %d to %q, want %d back to /", rec.Code, rec.Header().Get("Location"), http.StatusSeeOther)
-	}
-
-	// The page the redirect lands on is a navigation, which is the only read the
-	// flash spends itself on.
-	next := httptest.NewRequest(http.MethodGet, "/", nil)
-	next.Header.Set("Accept", "text/html")
-	for _, cookie := range rec.Result().Cookies() {
-		next.AddCookie(cookie)
-	}
-	errs, _, ok := m.flash.Take(httptest.NewRecorder(), next)
-	if !ok || len(errs["name"]) == 0 {
-		t.Fatalf("the redirect carries no message for name in the flash: %v", errs)
-	}
-}
-
-// TestTheRouterAnswersAMissingRecordWith404 holds the half of ErrNotFound the
-// unit suite cannot: that the router this module registers on answers it, with
-// no mapping written in the module.
-func TestTheRouterAnswersAMissingRecordWith404(t *testing.T) {
-	t.Parallel()
-
-	router := fhttp.NewRouter()
-	router.Action(http.MethodGet, "/missing", func(*fhttp.Context) error {
-		return fcm.ErrNotFound
-	})
-	m := mounted{router: router}
-
-	if rec := m.answer(t, http.MethodGet, "/missing", ""); rec.Code != http.StatusNotFound {
-		t.Fatalf("ErrNotFound answered %d, want %d", rec.Code, http.StatusNotFound)
-	}
-}
-
-func TestTheModuleRegistersItsRoutesUnderItsPrefix(t *testing.T) {
-	t.Parallel()
-
-	m := mount(t, fcm.Config{Prefix: "/widgets"})
-
-	got := make([]string, 0, 3)
-	for _, route := range m.router.Routes() {
+	var got []string
+	for _, route := range w.router.Routes() {
 		if route.Module != "fcm" {
 			t.Errorf("the route %s %s is not tagged with the module name: %q", route.Method, route.Pattern, route.Module)
+		}
+		if route.Pattern == reservedPrefix || strings.HasPrefix(route.Pattern, reservedPrefix+"/") {
+			t.Errorf("the route %s %s is under %s/, which the framework refuses at boot", route.Method, route.Pattern, reservedPrefix)
 		}
 		got = append(got, route.Method+" "+route.Pattern)
 	}
 	sort.Strings(got)
-
-	want := []string{"GET /widgets", "GET /widgets/{id}", "POST /widgets"}
-	if len(got) != len(want) || len(got) != len(everyRoute) {
-		t.Fatalf("registered %v, want %v, and everyRoute reaches %d of them", got, want, len(everyRoute))
+	want := []string{
+		"DELETE /mobile/devices/{id}", "GET /mobile/devices", "POST /mobile/devices", "POST /mobile/devices/unregister",
 	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("registered %v, want %v", got, want)
-		}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("registered %v, want %v", got, want)
 	}
-}
-
-// TestNoRouteLandsInTheFrameworkNamespace is the one property of this package
-// that syntax cannot hold, and it is why it is checked here rather than beside
-// the other four in tests/Unit/audit_test.go: a prefix arrives through
-// configuration, so the only way to know where the routes ended up is to
-// register them and read the table back.
-//
-// Both the default and a configured prefix are mounted, because the two reach
-// the router by different paths and only one of them is written in this
-// repository.
-func TestNoRouteLandsInTheFrameworkNamespace(t *testing.T) {
-	t.Parallel()
-
-	for _, cfg := range []fcm.Config{
-		{},
-		{Prefix: "/widgets"},
-	} {
-		m := mount(t, cfg)
-
-		registered := 0
-		for _, route := range m.router.Routes() {
-			registered++
-			if route.Pattern == reservedPrefix || strings.HasPrefix(route.Pattern, reservedPrefix+"/") {
-				t.Errorf("the route %s %s is registered under %s/, which the framework keeps for itself and refuses at boot",
-					route.Method, route.Pattern, reservedPrefix)
-			}
-		}
-		if registered == 0 {
-			t.Fatal("the module registered no route, so this test proved nothing")
-		}
+	if len(want) != len(everyRoute) {
+		t.Fatalf("everyRoute reaches %d of %d routes", len(everyRoute), len(want))
 	}
 }
 
 func TestNewRefusesAWiringThatCannotWork(t *testing.T) {
 	t.Parallel()
-
-	sessions := security.NewSessionStore([]byte(appKey), time.Hour, false, security.NewMemoryBackend())
+	w := install(t, false, nil)
+	sessions := security.NewSessionStore([]byte(appKey), 0, false, security.NewMemoryBackend())
 	handle := data.Wrap(nil, data.DialectSQLite)
-	valid := fcm.Config{}
+	valid := fcm.Config{Credentials: w.fb.credentials(t), Key: []byte(appKey)}
 
-	if _, err := fcm.New(fcm.Config{PageSize: -1}, handle, sessions); err == nil {
-		t.Error("a configuration with a negative page size was accepted")
+	if _, err := fcm.New(valid, handle, nil); err != nil {
+		t.Fatalf("a module without routes needs no sessions: %v", err)
+	}
+	routes := valid
+	routes.Routes = true
+	if _, err := fcm.New(routes, handle, nil); err == nil {
+		t.Error("routes without a session store were accepted")
 	}
 	if _, err := fcm.New(valid, nil, sessions); err == nil {
 		t.Error("a nil database handle was accepted")
 	}
-	if _, err := fcm.New(valid, handle, nil); err == nil {
-		t.Error("a nil session store was accepted")
+	if _, err := fcm.New(fcm.Config{Key: []byte(appKey)}, handle, sessions); err == nil {
+		t.Error("a configuration with no credentials and no sender was accepted")
 	}
-	if _, err := fcm.New(valid, handle, sessions); err != nil {
-		t.Fatalf("a valid wiring was refused: %v", err)
+	if _, err := fcm.New(fcm.Config{Credentials: valid.Credentials, Key: []byte("short")}, handle, sessions); err == nil {
+		t.Error("a short key was accepted")
 	}
-}
-
-func TestNewRefusesARoutePrefixThatCannotBeRegistered(t *testing.T) {
-	t.Parallel()
-
-	sessions := security.NewSessionStore([]byte(appKey), time.Hour, false, security.NewMemoryBackend())
-	handle := data.Wrap(nil, data.DialectSQLite)
-
-	for _, prefix := range []string{"/widgets{", "/widgets/{id}"} {
-		if _, err := fcm.New(fcm.Config{Prefix: prefix}, handle, sessions); err == nil {
-			t.Errorf("New accepted route prefix %q, which would panic during route registration", prefix)
+	// A Sender replaces the credentials, for the application's own tests.
+	if _, err := fcm.New(fcm.Config{Sender: &fcm.Fake{}, Key: []byte(appKey)}, handle, sessions); err != nil {
+		t.Errorf("a fake sender with no credentials was refused: %v", err)
+	}
+	for _, prefix := range []string{"fcm", "/fcm/", "/", "/widgets{", "/widgets/{id}", "/_arandu/fcm"} {
+		bad := valid
+		bad.Prefix = prefix
+		if _, err := fcm.New(bad, handle, sessions); err == nil {
+			t.Errorf("New accepted route prefix %q", prefix)
+		}
+	}
+	for name, mutate := range map[string]func(*fcm.Config){
+		"negative tries":     func(c *fcm.Config) { c.Tries = -1 },
+		"too many phones":    func(c *fcm.Config) { c.MaxDevicesPerUser = fcm.MaxDevicesPerUserLimit + 1 },
+		"negative stale":     func(c *fcm.Config) { c.StaleAfterDays = -1 },
+		"plain http base":    func(c *fcm.Config) { c.APIBase = "http://fcm.example.com" },
+		"relative base":      func(c *fcm.Config) { c.APIBase = "fcm.example.com" },
+		"queue name, spaces": func(c *fcm.Config) { c.QueueName = "my queue" },
+	} {
+		bad := valid
+		mutate(&bad)
+		if _, err := fcm.New(bad, handle, sessions); err == nil {
+			t.Errorf("New accepted %s", name)
 		}
 	}
 }
 
-func TestTheModuleDeclaresItsSchema(t *testing.T) {
+func TestTheRouterAnswersAMissingDeviceWith404(t *testing.T) {
 	t.Parallel()
-
-	sessions := security.NewSessionStore([]byte(appKey), time.Hour, false, security.NewMemoryBackend())
-	module, err := fcm.New(fcm.Config{}, data.Wrap(nil, data.DialectSQLite), sessions)
-	if err != nil {
-		t.Fatalf("building the module: %v", err)
+	router := fhttp.NewRouter()
+	router.Action(http.MethodGet, "/missing", func(*fhttp.Context) error { return fcm.ErrNotFound })
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/missing", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("ErrNotFound answered %d, want 404", rec.Code)
 	}
+}
 
-	declared := module.Migrations()
-	if len(declared) == 0 {
-		t.Fatal("the module declares migrations = true and returns none")
+func TestRegisterJobHandlersRefusesAWorkerThatAlreadyHasIt(t *testing.T) {
+	t.Parallel()
+	w := install(t, true, nil)
+	if err := w.module.RegisterJobHandlers(w.worker); err == nil {
+		t.Error("registering the handler twice was accepted (the worker panics on a duplicate)")
 	}
-
-	names := make([]string, 0, len(declared))
-	for _, migration := range declared {
-		name := migration.GetName()
-		if name == "" {
-			t.Fatal("a migration has no name, and the name is what carries the order")
-		}
-		names = append(names, name)
-
-		// A migration that cannot be rolled back is a deploy that cannot be
-		// undone. The migrator finds Down by type assertion, so a Down with the
-		// wrong signature is a rollback that silently does nothing.
-		if _, ok := migration.(migrations.ReversibleMigration); !ok {
-			t.Errorf("the migration %s has no Down", name)
-		}
-	}
-
-	if !sort.StringsAreSorted(names) {
-		t.Fatalf("the migrations are not returned in the order their names sort in: %v", names)
+	if err := w.module.RegisterJobHandlers(nil); err == nil {
+		t.Error("a nil worker was accepted")
 	}
 }
