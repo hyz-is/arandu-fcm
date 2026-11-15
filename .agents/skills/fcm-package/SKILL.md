@@ -169,7 +169,7 @@ application that wants other routes leaves `Routes` off and calls
 `fcmModule.Devices()` (`Register`, `Unregister`, `ListForUser`) from its own.
 
 Every route sits behind `RequireAuth`, mounted by the package itself. A request
-with no session is sent to `/auth/login` — 303, or `HX-Redirect` for an htmx
+with no session is sent to `/auth/login` — 303, or `YPY-Redirect` for a YPY
 request. That is the sign-in screen the starter kit publishes; an application
 without one sees a 404 there. **Symptom to recognise:** every route of the
 package redirects to `/auth/login`. Nobody is signed in on that request: the
