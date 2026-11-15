@@ -52,7 +52,8 @@ import (
 // It implements foundation.Module, which is Name and Routes and nothing else --
 // that pair is the whole public contract between a package and the framework.
 // It also implements foundation.Migratable, because it owns a table, and
-// foundation.Schedulable, because it declares the clean of stale devices.
+// foundation.Schedulable, because it declares the clean of stale devices, and
+// foundation.JobHandlers, because the push is a job it registers on the worker.
 type Module struct {
 	cfg      Config
 	devices  *DeviceService
@@ -66,6 +67,7 @@ var (
 	_ foundation.Module      = (*Module)(nil)
 	_ foundation.Migratable  = (*Module)(nil)
 	_ foundation.Schedulable = (*Module)(nil)
+	_ foundation.JobHandlers = (*Module)(nil)
 )
 
 // New returns the module, or the reason it cannot be built.
