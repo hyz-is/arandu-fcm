@@ -6,7 +6,7 @@
 # four lines below worth reading before installing anything.
 
 name = "hyz-is/fcm"
-framework = ">= 0.67"
+framework = ">= 0.69"
 profiles = ["conventional", "performance"]
 
 [permissions]
