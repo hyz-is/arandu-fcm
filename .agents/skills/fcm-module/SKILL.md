@@ -18,15 +18,17 @@ var (
 )
 ```
 
-Those two lines are compile-time proof and they belong at the top of
+Those lines are compile-time proof and they belong at the top of
 `module.go`. Add one for every contract the module takes on, so the failure lands
 here rather than at the registration in somebody else's repository.
 
 ## Taking on more than routes
 
-Six interfaces sit beside `Module` in `framework/foundation`, two of which this
-package already implements, and each is opted into the same way — by
-implementing it. Confirm the set for the version in `go.mod` with:
+Seven interfaces sit beside `Module` in `framework/foundation` for a package
+like this one, two of which it already implements, and each is opted into the
+same way — by implementing it. The framework asks a module about a few more
+(`Commandable`, `CSRFExempt`, `JobHandlers`, `Diagnostic`), and `go doc` lists
+them. Confirm the set for the version in `go.mod` with:
 
 ```sh
 export GOWORK=off
@@ -39,6 +41,7 @@ go doc github.com/arandu-io/framework/foundation
 | `Background` | run a loop of the module's own |
 | `Schedulable` | declare work for the scheduler — this package implements it, for the clean of stale devices |
 | `Migratable` | own tables — this package implements it |
+| `Publishable` | hand files to the project, such as views |
 | `Health` | report on the storage it depends on |
 | `Closable` | give resources back at shutdown |
 

@@ -211,9 +211,9 @@ func (m *Module) destroy(ctx *fhttp.Context) error {
 	return ctx.Status(stdhttp.StatusNoContent)
 }
 
-// RegisterJobHandlers registers the job that delivers a push with the host
-// application's queue worker. It is the application's to call, beside the
-// handlers of its other modules, and it is needed only when Config.Queue is set.
+// RegisterJobHandlers registers the job that delivers a push on worker. The
+// framework calls it for a registered module, so the application has no line
+// for it; the job is put on the queue only when Config.Queue is set.
 func (m *Module) RegisterJobHandlers(worker *queue.Worker) error {
 	if worker == nil {
 		return errors.New("fcm: RegisterJobHandlers needs a worker")

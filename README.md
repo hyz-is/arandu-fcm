@@ -32,7 +32,7 @@ go get github.com/hyz-is/arandu-fcm
 
 An Arandu application registers a module explicitly. There is no service
 provider, no container and no discovery, so these are the lines to paste into
-`bootstrap/app.go` and there are no others.
+`bootstrap/app.go`, and there are no others.
 
 The imports, with the other imports:
 
@@ -47,23 +47,28 @@ import (
 )
 ```
 
-The construction, in `Build`, after the database, the session store and the
-queue exist and before `k.Register`. The service account comes from the
-environment, and the key is the application's own:
+The construction, in `App`, once `NewAppServiceProvider` has returned and the
+queue exists. `New` refuses a wiring that cannot work and `Configure` has no way
+to return that error, so the module is built where the error can leave; the
+database and the session store are the ones the framework built from the
+configuration. The service account comes from the environment, and the key is the
+application's own:
 
 ```go
 	credentials, err := fcm.CredentialsFromEnv(os.LookupEnv)
 	if err != nil {
-		return App{}, err
+		_ = drivers.Close()
+		return nil, err
 	}
 	fcmModule, err := fcm.New(fcm.Config{
 		Credentials: credentials,
 		Key:         appKey,   // the application's key: at least 32 bytes
 		Queue:       jobs,     // the application's queue.Queue; nil sends inline, with no retry
 		Routes:      true,     // the JSON routes for the mobile application; off by default
-	}, db, sessions)
+	}, drivers.DB, drivers.Sessions)
 	if err != nil {
-		return App{}, err
+		_ = drivers.Close()
+		return nil, err
 	}
 ```
 
@@ -77,21 +82,19 @@ others:
 	})
 ```
 
-The registration, inside the `k.Register(...)` call already there:
+And the registration, in the `WithProviders(...)` chain the builder is made of:
 
 ```go
-		fcmModule,
+	return Configure(cfg, drivers, app).
+		WithProviders(fcmModule).
+		WithVersion(version, commit).
+		Create()
 ```
 
 The worker. When `Queue` is set, the package puts one job per phone on the
-`fcm` queue, and the application's worker has to know the handler. Register it
-beside the handlers of the other modules, and run a worker for the queue:
-
-```go
-	if err := fcmModule.RegisterJobHandlers(worker); err != nil {
-		return err
-	}
-```
+`fcm` queue. The module declares its handler (`RegisterJobHandlers`) and the
+framework collects it from a registered module, so the application writes no
+line for it; it only runs a worker for the queue:
 
 ```bash
 aru queue:work --queue=fcm

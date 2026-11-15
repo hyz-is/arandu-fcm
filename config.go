@@ -65,8 +65,8 @@ type Config struct {
 
 	// Queue is where pushes are put to be delivered by a worker, with the retry
 	// and backoff the queue gives. Nil sends each push before the notification
-	// returns, with no retry. Register the handler with RegisterJobHandlers and
-	// run the worker for QueueName.
+	// returns, with no retry. The registered module brings the handler, so a
+	// worker for QueueName is what delivers.
 	Queue queue.Queue
 
 	// QueueName is the queue the pushes go on. Empty means DefaultQueue.

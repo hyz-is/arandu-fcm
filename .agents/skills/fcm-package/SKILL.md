@@ -20,9 +20,9 @@ application, it does not happen.
 go get github.com/hyz-is/arandu-fcm
 ```
 
-## The lines of wiring, and where each one goes
+## The wiring, and where each part goes
 
-All of them are in `bootstrap/app.go`. Nothing else in the application changes,
+All of it is in `bootstrap/app.go`. Nothing else in the application changes,
 and `aru make:module` does not edit this file for you.
 
 The imports, with the other module imports:
@@ -38,22 +38,27 @@ import (
 )
 ```
 
-The construction, in `Build`, after the database, the session store and the queue
-exist and before `k.Register`:
+The construction, in `App`, once `NewAppServiceProvider` has returned and the
+queue exists. `New` refuses a wiring that cannot work and `Configure` has no way
+to return that error, so the module is built where the error can leave; the
+database and the session store are the ones the framework built from the
+configuration:
 
 ```go
 	credentials, err := fcm.CredentialsFromEnv(os.LookupEnv)
 	if err != nil {
-		return App{}, err
+		_ = drivers.Close()
+		return nil, err
 	}
 	fcmModule, err := fcm.New(fcm.Config{
 		Credentials: credentials,
 		Key:         appKey, // at least 32 bytes
 		Queue:       jobs,   // the application's queue.Queue; nil sends inline, with no retry
 		Routes:      true,   // the JSON routes the mobile app calls; off by default
-	}, db, sessions)
+	}, drivers.DB, drivers.Sessions)
 	if err != nil {
-		return App{}, err
+		_ = drivers.Close()
+		return nil, err
 	}
 ```
 
@@ -66,10 +71,13 @@ The channel, in the notifier the application already builds:
 	})
 ```
 
-And the registration, inside the `k.Register(...)` call already there:
+And the registration, in the `WithProviders(...)` chain the builder is made of:
 
 ```go
-		fcmModule,
+	return Configure(cfg, drivers, app).
+		WithProviders(fcmModule).
+		WithVersion(version, commit).
+		Create()
 ```
 
 `New` returns an error rather than starting half-wired. It refuses a
@@ -113,17 +121,13 @@ application too.
 **Symptom to recognise:** `no such table`, or `relation does not exist`, from a
 route that authorized correctly. The migration has not run.
 
-With a `Queue`, the handler has to be known to the worker, beside the handlers of
-the other modules:
-
-```go
-	if err := fcmModule.RegisterJobHandlers(worker); err != nil {
-		return err
-	}
-```
+With a `Queue`, the module declares its handler (`RegisterJobHandlers`) and the
+framework collects it from the registered module, so the application writes no
+line for it. Registering it again in the application's own `WithJobs` is refused
+at boot, naming both declarers.
 
 **Symptom to recognise:** the `fcm` queue only grows. No worker is running for it,
-or it was started without the handler.
+or it was started for another queue.
 
 ## Send a push
 
